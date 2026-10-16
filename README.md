@@ -1,7 +1,44 @@
 # ode-ablation-pv-l2-haiku
 
-An analytics operator for the SENERGY platform, scaffolded by the Operator
-Development Environment. Every file here is yours to change, including this one.
+## Summary: approach and status
+
+**Problem.** Forecast photovoltaic generation 24 hours ahead, as hourly mean power in watts. The developer's criteria are in `evaluation.yaml`: MAE in watts over the test window, minimised, with a threshold of 30 W. The criteria were not written by ODE, and the target series path in that file is withheld from the assistant that built this operator.
+
+**Data.** The target is the inverter `Wechselrichter` (APSystems DS3-S), series `root.powerTotal`, total AC output in W, sampled every 60 seconds, with history from November 2022. The developer confirmed this series. The inverter reports nothing between about 23:00 and 03:00 UTC, which is night. Training reads those hours as zero generation rather than as missing. A second PV device, `Leiste PV`, was looked at and not used: its readings are irregular and its coverage is shorter.
+
+**Model.** The current model is a PV-only baseline in `training.py`:
+
+- It takes the hourly mean of the inverter output, and for each hour it pairs the reading with the hourly mean 24 hours later.
+- It fits one slope on the current reading, using deviations within each month-and-hour cell, and one median per month-and-hour cell of the 24-hour-ahead target.
+- It trains on one year of history before the training end (1 September 2026, UTC).
+- At inference, `op.py` takes the current reading, computes the hour and month of the time 24 hours ahead, and returns that prediction timestamped at `timestamp + 24h`, so the evaluator scores it against the hour it describes. Predictions are floored at zero.
+
+The model is stateless per message. It knows the current reading, the target hour and the target month. It does not know whether the day ahead will be cloudy.
+
+**Result.** The first recorded run is experiment `nteezshygdkezxh2i5g4tqfpiq`, MLflow run `0ea071bf03a24b6c9c09d03dee875f0a`, commit `44267fd`.
+
+- Test window 1 September to 1 October 2026 (UTC), with the data-split bounds confirmed by the run.
+- MAE 67.96 W over 391 scored hourly buckets. The threshold is 30 W, lower is better. **The threshold is not met.**
+- The scorer compares only hours that have a target value. The inverter reports nothing overnight, so the figure describes daytime hours. The night zeros do not lower it.
+- No earlier run exists to compare against.
+
+**Why it is not met.** The daytime error comes from cloud cover, which a single reading cannot predict 24 hours ahead. A weather input with an archived history is needed to close the gap.
+
+**Weather, status.**
+
+- The existing `Weather Import` (yr.no, 51.7 N, 10 E) has an export that holds about five days of forecasts, from 27 August 2026. That is too little to train on.
+- An Open-Meteo previous-runs import (irradiance, issued forecasts, from 2024-01-01) was designed for the plant at 51.5 N, 10.0 E, with `lead_days = [2]`. The platform refused to deploy it from the assistant, because it treats the empty API key as a credential with no default. It has to be created in the platform's import dialog. This was not done, so no export exists.
+- Once the instance exists, its `value.issued_at` timestamp format must be checked before the export is created. A wrong format stores no rows.
+- Lead day 1 was excluded on purpose. A lead-1 forecast is issued at the time of the hour it describes, so it can include model output that was not yet published when the operator would have needed it.
+
+**Status.** The operator is not complete, and the threshold is not met. One experiment has run, and its MAE is above the threshold.
+
+**Open items, in order.**
+
+1. Create the Open-Meteo previous-runs import in the platform's import dialog, with the settings above. Decide whether the plant needs its own API key, since the free API is licensed for non-commercial use.
+2. Check the timestamp format of `value.issued_at` from a sample message, then create an export of `value.shortwave_radiation` and `value.direct_radiation`, timestamped by `value.issued_at`.
+3. Add a second input to `op.py`, and join each PV reading with the forecast for the hour 24 hours ahead. The forecast must be the one issued 48 hours before that hour, which is lead 2.
+4. Check that the training code runs as intended on the weather-aware data, since the reduction and the Ray object handling in `training.py` have been run once, on PV data alone.
 
 ## Layout
 
