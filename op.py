@@ -17,7 +17,7 @@ from mlflow.pyfunc import PyFuncModel, PythonModel
 from operator_lib.util import Config, MLOperator, Selector
 from operator_lib.util.helpers import TrainMlflowLogger
 
-from training import train_model
+from training import HORIZON, train_model
 
 
 class CustomConfig(Config):
@@ -31,6 +31,16 @@ class CustomConfig(Config):
     # Retrain at most this often, in seconds. A day, so a deployment does not
     # spend its life training.
     retrain_after_s = 86400
+
+
+def _utc(timestamp: datetime.datetime) -> datetime.datetime:
+    """The message time as an aware UTC datetime, so hour and month are UTC.
+
+    Training reads its timestamps as UTC, so inference must too.
+    """
+    if timestamp.tzinfo is None:
+        return timestamp.replace(tzinfo=datetime.timezone.utc)
+    return timestamp.astimezone(datetime.timezone.utc)
 
 
 class Operator(MLOperator):
@@ -62,17 +72,23 @@ class Operator(MLOperator):
     ]:
         """Called for every message. Returns (result timestamp, result, new model).
 
-        The result timestamp may be None, which means now; it is what lets a
-        forecast carry the time it is about rather than the time it was made. The
-        third element replaces the registered model and is almost always None —
-        return one only from an algorithm that genuinely updates per message.
+        The result is the hourly mean PV power expected 24 hours after this
+        reading, and it is timestamped at that future time, so the evaluation
+        scores it against the hour it is about.
         """
         value = data.get("value")
         if value is None or model is None:
             return None, None, None
 
-        prediction = model.predict({"timestamp": timestamp, "value": float(value)})
-        return None, {"prediction": prediction}, None
+        target_time = _utc(timestamp) + HORIZON
+        prediction = model.predict(
+            {
+                "value": float(value),
+                "month": target_time.month,
+                "hour": target_time.hour,
+            }
+        )
+        return target_time, {"prediction": prediction}, None
 
     def train(
         self, model: typing.Optional[PyFuncModel], logger: TrainMlflowLogger
